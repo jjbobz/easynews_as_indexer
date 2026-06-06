@@ -673,6 +673,14 @@ def _build_thumbnail_url(
     return f"{base}{prefix}/pr-{hash_id}.jpg/th-{safe_slug}.jpg"
 
 
+def _easynews_details_url(title: str) -> str:
+    return (
+        "https://members.easynews.com/2.0/search/solr-search/"
+        "?fly=2&sb=1&pno=1&pby=250&u=1&chxu=1&chxgx=1&st=basic"
+        f"&gps={quote(title)}&vv=1&safeO=0&s1=relevance&s1d=-"
+    )
+
+
 def _extract_release_markers(
     text: str, quality_hint: Optional[str] = None
 ) -> Dict[str, Optional[Any]]:
@@ -1303,6 +1311,8 @@ def api():
         for it in items:
             enc_id = encode_id(it)
             title = xml_escape(it["title"]) if it["title"] else "Untitled"
+            detail_url = _easynews_details_url(it.get("title") or "")
+            safe_detail_url = xml_escape(detail_url)
             link = f"{request.url_root.rstrip('/')}/api?t=get&id={enc_id}&apikey={request.args.get('apikey')}"
             safe_link = xml_escape(link)
             size = it["size"]
@@ -1338,6 +1348,8 @@ def api():
                 f'<newznab:attr name="category" value="{category_id}"/>',
                 f'<newznab:attr name="usenetdate" value="{posted_str}"/>',
                 f'<newznab:attr name="posted" value="{posted_epoch}"/>',
+                f'<newznab:attr name="comments" value="{safe_detail_url}"/>',
+                f'<newznab:attr name="details" value="{safe_detail_url}"/>',
             ]
             if poster:
                 attr_parts.append(
@@ -1367,6 +1379,7 @@ def api():
                 f"<title>{title}</title>"
                 f'<guid isPermaLink="false">{guid}</guid>'
                 f"<link>{safe_link}</link>"
+                f"<comments>{safe_detail_url}</comments>"
                 f"<category>{category_id}</category>"
                 f"<pubDate>{posted_str}</pubDate>"
                 f"{attr_xml}"
