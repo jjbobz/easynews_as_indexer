@@ -1,5 +1,6 @@
 import base64
 import html
+import logging
 import os
 import re
 import threading
@@ -10,11 +11,14 @@ from urllib.parse import quote
 
 from flask import Flask, Response, request
 import json
+import requests
 
 from easynews_client import EasynewsClient, EasynewsError, SearchItem
 
 
 APP = Flask(__name__)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger(__name__)
 _CLIENT: Optional[EasynewsClient] = None
 _CLIENT_LOCK = threading.Lock()
 _CLIENT_LOGIN_TTL = 600  # seconds
@@ -179,6 +183,17 @@ _ALLOWED_VIDEO_EXTENSIONS = {
     ".flv",
     ".webm",
 }
+_ALLOWED_EBOOK_EXTENSIONS = {
+    ".epub",
+    ".mobi",
+    ".azw3",
+    ".pdf",
+}
+_ALLOWED_AUDIOBOOK_EXTENSIONS = {
+    ".mp3",
+    ".m4b",
+}
+_ALLOWED_BOOK_EXTENSIONS = _ALLOWED_EBOOK_EXTENSIONS | _ALLOWED_AUDIOBOOK_EXTENSIONS
 
 _STOPWORDS = {
     "the",
@@ -245,7 +260,9 @@ CATEGORY_TV = 5000
 CATEGORY_TV_HD = 5030
 CATEGORY_TV_UHD = 5040
 CATEGORY_ANIME = 5070  # Anime as TV subcategory
-CATEGORY_OTHER = 7000
+CATEGORY_BOOKS = 7000
+CATEGORY_EBOOK = 7010
+CATEGORY_AUDIOBOOK = 7040
 
 
 def _parse_duration_seconds(raw: Any) -> Optional[int]:
@@ -312,7 +329,112 @@ def _sanitize_phrase(text: str) -> str:
     return working.lower().strip()
 
 
-def _is_flagged_item(item: Any, ext: str, duration_seconds: Optional[int]) -> bool:
+def _normalize_ext(ext: Optional[str]) -> str:
+    if not ext:
+        return ""
+    normalized = ext.strip().lower()
+    if normalized and not normalized.startswith("."):
+        normalized = f".{normalized}"
+    return normalized
+
+
+def _split_categories(cat_param: str) -> Set[str]:
+    return {part.strip() for part in cat_param.split(",") if part.strip()}
+
+
+def _requested_book_kinds(cat_param: str) -> Set[str]:
+    requested = _split_categories(cat_param)
+    kinds: Set[str] = set()
+    if "7000" in requested:
+        kinds.update({"ebook", "audiobook"})
+    if "7010" in requested:
+        kinds.add("ebook")
+    if "7040" in requested:
+        kinds.add("audiobook")
+    return kinds
+
+
+def _joined_text(*values: Optional[Any]) -> str:
+    parts: List[str] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            parts.extend(str(part) for part in value if part is not None)
+        else:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _extract_group_text(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return _joined_text(
+        item.get("group"),
+        item.get("groups"),
+        item.get("grp"),
+        item.get("newsgroup"),
+        item.get("newsgroups"),
+        item.get("category"),
+        item.get("cat"),
+    )
+
+
+def _detect_book_category(title: str, ext: Optional[str], group_text: str = "") -> Optional[int]:
+    normalized_ext = _normalize_ext(ext)
+    haystack = _joined_text(title, group_text)
+    if normalized_ext in _ALLOWED_AUDIOBOOK_EXTENSIONS:
+        return CATEGORY_AUDIOBOOK
+    if any(marker in haystack for marker in ("audiobook", "audio book", "spoken word")):
+        return CATEGORY_AUDIOBOOK
+    if normalized_ext in _ALLOWED_EBOOK_EXTENSIONS:
+        return CATEGORY_EBOOK
+    if any(marker in haystack for marker in ("ebook", "e-book", "ebooks", "e-books")):
+        return CATEGORY_EBOOK
+    if "book" in haystack and normalized_ext in _ALLOWED_BOOK_EXTENSIONS:
+        return CATEGORY_BOOKS
+    return None
+
+
+def _search_profile(t: str, cat_param: str) -> Dict[str, Any]:
+    book_kinds = _requested_book_kinds(cat_param)
+    if book_kinds:
+        allowed_extensions: Set[str] = set()
+        file_types: List[str] = []
+        if "ebook" in book_kinds:
+            allowed_extensions.update(_ALLOWED_EBOOK_EXTENSIONS)
+        if "audiobook" in book_kinds:
+            allowed_extensions.update(_ALLOWED_AUDIOBOOK_EXTENSIONS)
+            # EasyNews audiobook posts may be header/newsgroup based, and
+            # fty[]=AUDIO is not proven to cover all audiobook releases.
+        return {
+            "kind": "books",
+            "book_kinds": book_kinds,
+            "allowed_extensions": allowed_extensions or _ALLOWED_BOOK_EXTENSIONS,
+            "allowed_file_types": None,
+            "file_types": file_types,
+            "enforce_min_duration": False,
+            "default_min_size_mb": 0,
+        }
+    return {
+        "kind": "video",
+        "book_kinds": set(),
+        "allowed_extensions": _ALLOWED_VIDEO_EXTENSIONS,
+        "allowed_file_types": {"VIDEO"},
+        "file_types": ["VIDEO"],
+        "enforce_min_duration": True,
+        "default_min_size_mb": 100,
+    }
+
+
+def _is_flagged_item(
+    item: Any,
+    ext: str,
+    duration_seconds: Optional[int],
+    allowed_extensions: Optional[Set[str]] = None,
+    allowed_file_types: Optional[Set[str]] = None,
+    enforce_min_duration: bool = True,
+) -> bool:
     passwd = False
     virus = False
     file_type = ""
@@ -322,11 +444,16 @@ def _is_flagged_item(item: Any, ext: str, duration_seconds: Optional[int]) -> bo
         file_type = str(item.get("type") or item.get("file_type") or "").upper()
     if passwd or virus:
         return True
-    if file_type and file_type != "VIDEO":
+    if allowed_file_types is not None and file_type and file_type not in allowed_file_types:
         return True
-    if ext and ext.lower() not in _ALLOWED_VIDEO_EXTENSIONS:
+    normalized_ext = _normalize_ext(ext)
+    if allowed_extensions is not None and normalized_ext not in allowed_extensions:
         return True
-    if duration_seconds is not None and duration_seconds < _MIN_DURATION_SECONDS:
+    if (
+        enforce_min_duration
+        and duration_seconds is not None
+        and duration_seconds < _MIN_DURATION_SECONDS
+    ):
         return True
     return False
 
@@ -458,6 +585,14 @@ def _detect_category(title: str, metadata: Dict[str, Optional[Any]]) -> int:
     Returns:
         Newznab category ID (int)
     """
+    book_category = _detect_book_category(
+        title,
+        metadata.get("ext"),
+        str(metadata.get("groups") or ""),
+    )
+    if book_category is not None:
+        return book_category
+
     # Check for anime FIRST (priority detection)
     if _detect_anime(title):
         return CATEGORY_ANIME  # 5070 - No quality subcategories
@@ -531,8 +666,13 @@ def filter_and_map(
     query_meta: Optional[Dict[str, Optional[Any]]] = None,
     strict_phrase: Optional[str] = None,
     strict_match: bool = False,
+    allowed_extensions: Optional[Set[str]] = None,
+    allowed_file_types: Optional[Set[str]] = None,
+    enforce_min_duration: bool = True,
+    book_kinds: Optional[Set[str]] = None,
 ) -> List[dict]:
     token_set: Set[str] = set(query_tokens or [])
+    wanted_book_kinds = set(book_kinds or [])
     thumb_base = json_data.get("thumbURL") or json_data.get("thumbUrl")
     out: List[dict] = []
     for it in json_data.get("data", []):
@@ -548,6 +688,7 @@ def filter_and_map(
         extension_field: Optional[str] = None
         duration_raw: Any = None
         fullres: Optional[str] = None
+        group_text = ""
 
         if isinstance(it, list):
             if len(it) >= 12:
@@ -574,14 +715,15 @@ def filter_and_map(
             extension_field = it.get("extension") or it.get("ext")
             duration_raw = it.get("14") or it.get("duration") or it.get("len")
             fullres = it.get("fullres") or it.get("resolution")
+            group_text = _extract_group_text(it)
 
         if not hash_id or not ext:
             continue
 
         filename_no_ext = filename_no_ext or ""
-        ext = ext or ""
+        ext = _normalize_ext(ext or "")
         if extension_field and not ext:
-            ext = extension_field
+            ext = _normalize_ext(extension_field)
 
         # Try to use numeric size if present; otherwise skip (can't verify <100MB rule)
         if not isinstance(size, int):
@@ -595,7 +737,14 @@ def filter_and_map(
 
         duration_seconds = _parse_duration_seconds(duration_raw)
 
-        if _is_flagged_item(it, ext, duration_seconds):
+        if _is_flagged_item(
+            it,
+            ext,
+            duration_seconds,
+            allowed_extensions=allowed_extensions,
+            allowed_file_types=allowed_file_types,
+            enforce_min_duration=enforce_min_duration,
+        ):
             continue
 
         title: Optional[str] = None
@@ -613,6 +762,17 @@ def filter_and_map(
         if not title:
             fallback = subject or f"{filename_no_ext}{ext}"
             title = _normalize_title(fallback)
+
+        book_category = _detect_book_category(title, ext, group_text)
+        if wanted_book_kinds:
+            if book_category == CATEGORY_AUDIOBOOK:
+                item_book_kind = "audiobook"
+            elif book_category in {CATEGORY_EBOOK, CATEGORY_BOOKS}:
+                item_book_kind = "ebook"
+            else:
+                continue
+            if item_book_kind not in wanted_book_kinds:
+                continue
 
         quality = _extract_quality(title, fullres)
         title_meta = _extract_release_markers(title, quality)
@@ -663,6 +823,7 @@ def filter_and_map(
                 "duration_hms": duration_formatted,
                 "quality": quality,
                 "thumbnail": thumbnail_url,
+                "groups": group_text,
                 "year": year,
                 "season": title_meta.get("season"),
                 "episode": title_meta.get("episode"),
@@ -699,7 +860,10 @@ def api():
             '<subcat id="5040" name="TV/UHD"/>'
             '<subcat id="5070" name="TV/Anime"/>'
             "</category>"
-            '<category id="7000" name="Other"/>'
+            '<category id="7000" name="Books">'
+            '<subcat id="7010" name="Books/EBook"/>'
+            '<subcat id="7040" name="Books/Audiobook"/>'
+            "</category>"
             "</categories>"
             "</caps>"
         )
@@ -744,11 +908,16 @@ def api():
             # Check if TV/Anime categories are requested
             tv_categories = {"5000", "5030", "5040"}
             anime_categories = {"5070"}
-            requested_categories = set(cat_param.split(",")) if cat_param else set()
+            requested_categories = _split_categories(cat_param)
+            book_kinds = _requested_book_kinds(cat_param)
             wants_tv = t == "tvsearch" or bool(requested_categories & tv_categories)
             wants_anime = bool(requested_categories & anime_categories)
             # Use appropriate fallback query
-            if wants_anime:
+            if "audiobook" in book_kinds:
+                q = "audiobook"
+            elif "ebook" in book_kinds:
+                q = "ebook"
+            elif wants_anime:
                 q = "one piece"  # Anime fallback
             elif wants_tv:
                 q = "breaking bad"  # TV fallback
@@ -775,24 +944,56 @@ def api():
         strict_phrase = _sanitize_phrase(raw_query) if strict_requested else None
         limit = int(request.args.get("limit", "100"))
         offset = int(request.args.get("offset", "0"))
+        profile = _search_profile(t, cat_param)
         min_size_param = request.args.get("minsize")
-        min_size_mb = 100
+        min_size_mb = profile["default_min_size_mb"]
         if min_size_param:
             try:
-                min_size_mb = max(100, int(min_size_param))
+                min_size_mb = max(profile["default_min_size_mb"], int(min_size_param))
             except ValueError:
-                min_size_mb = 100
+                min_size_mb = profile["default_min_size_mb"]
         min_bytes = min_size_mb * 1024 * 1024
 
         if fallback_query:
             # Check if TV/Anime categories are requested
             tv_categories = {"5000", "5030", "5040"}
             anime_categories = {"5070"}
-            requested_categories = set(cat_param.split(",")) if cat_param else set()
+            requested_categories = _split_categories(cat_param)
+            book_kinds = _requested_book_kinds(cat_param)
             wants_tv = t == "tvsearch" or bool(requested_categories & tv_categories)
             wants_anime = bool(requested_categories & anime_categories)
 
-            if wants_anime:
+            if "audiobook" in book_kinds:
+                items = [
+                    {
+                        "hash": "SAMPLEHASH_AUDIOBOOK123",
+                        "filename": "sample.audiobook",
+                        "ext": ".m4b",
+                        "sig": None,
+                        "size": 50 * 1024 * 1024,
+                        "title": "Sample Audiobook.m4b",
+                        "sample": True,
+                        "poster": "sample@example.com",
+                        "posted": int(time.time()),
+                        "groups": "alt.binaries.audiobooks",
+                    }
+                ]
+            elif "ebook" in book_kinds:
+                items = [
+                    {
+                        "hash": "SAMPLEHASH_EBOOK123",
+                        "filename": "sample.ebook",
+                        "ext": ".epub",
+                        "sig": None,
+                        "size": 2 * 1024 * 1024,
+                        "title": "Sample EBook.epub",
+                        "sample": True,
+                        "poster": "sample@example.com",
+                        "posted": int(time.time()),
+                        "groups": "alt.binaries.e-book",
+                    }
+                ]
+            elif wants_anime:
                 # Anime-appropriate fallback
                 items = [
                     {
@@ -842,7 +1043,8 @@ def api():
             # aim for maximum results per page
             data = c.search(
                 query=q,
-                file_type="VIDEO",
+                file_type=None,
+                file_types=profile["file_types"],
                 per_page=250,
                 sort_field="relevance",
                 sort_dir="-",
@@ -857,7 +1059,18 @@ def api():
                     query_meta=query_meta,
                     strict_phrase=strict_phrase,
                     strict_match=strict_requested,
+                    allowed_extensions=profile["allowed_extensions"],
+                    allowed_file_types=profile["allowed_file_types"],
+                    enforce_min_duration=profile["enforce_min_duration"],
+                    book_kinds=profile["book_kinds"],
                 )
+            logger.info(
+                "Mapped Easynews results: query=%r category_profile=%s returned=%s mapped=%s",
+                q,
+                profile["kind"],
+                len(data.get("data", [])),
+                len(items),
+            )
 
         # Trim by limit (handles fallback and real queries)
         items = items[offset : offset + limit]
@@ -895,6 +1108,8 @@ def api():
             year = it.get("year")
             season = it.get("season")
             episode = it.get("episode")
+            ext = it.get("ext")
+            groups = it.get("groups")
 
             title_text = it.get("title", "")
             title_metadata = {
@@ -902,6 +1117,8 @@ def api():
                 "episode": episode,
                 "year": year,
                 "quality": quality,
+                "ext": ext,
+                "groups": groups,
             }
             category_id = _detect_category(title_text, title_metadata)
 
@@ -973,11 +1190,16 @@ def api():
             )
             return resp
         si = to_search_item(d)
-        c = client()
-        payload = c.build_nzb_payload([si], name=d.get("title"))
-        # fetch content
-        url = "https://members.easynews.com/2.0/api/dl-nzb"
-        r = c.s.post(url, data=payload)
+        try:
+            c = client()
+            payload = c.build_nzb_payload([si], name=d.get("title"))
+            # fetch content
+            url = "https://members.easynews.com/2.0/api/dl-nzb"
+            r = c.s.post(url, data=payload, timeout=60)
+        except EasynewsError as e:
+            return Response(f"Upstream error: {e}", status=502)
+        except requests.exceptions.RequestException as e:
+            return Response(f"Upstream network error: {e}", status=502)
         if r.status_code != 200:
             return Response(f"Upstream error {r.status_code}", status=502)
         # Name file as title.nzb
