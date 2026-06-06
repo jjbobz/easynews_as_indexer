@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
@@ -111,15 +112,16 @@ def encode_id(item: dict) -> str:
         }
     if item.get("sample"):
         payload["sample"] = True
-    raw = (
-        base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode())
-        .decode()
-        .rstrip("=")
-    )
-    return raw
+    packed = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    raw = base64.urlsafe_b64encode(zlib.compress(packed)).decode().rstrip("=")
+    return f"z.{raw}"
 
 
 def decode_id(enc: str) -> dict:
+    if enc.startswith("z."):
+        pad = "=" * (-(len(enc) - 2) % 4)
+        raw = base64.urlsafe_b64decode(enc[2:] + pad)
+        return json.loads(zlib.decompress(raw).decode())
     pad = "=" * (-len(enc) % 4)
     raw = base64.urlsafe_b64decode(enc + pad).decode()
     return json.loads(raw)
@@ -1357,6 +1359,13 @@ def api():
         if not enc_id:
             return Response("Missing id", status=400)
         d = decode_id(enc_id)
+        release_items = to_search_items(d)
+        logger.info(
+            "NEWZNAB get release title=%r grouped_items=%s id_length=%s",
+            d.get("title") or d.get("filename"),
+            len(release_items),
+            len(enc_id),
+        )
         if d.get("sample"):
             title = d.get("title", "Sample Item")
             safe_title = "sample"
@@ -1375,11 +1384,32 @@ def api():
             return resp
         try:
             c = client()
-            payload = c.build_nzb_payload(to_search_items(d), name=d.get("title"))
+            payload = c.build_nzb_payload(release_items, name=d.get("title"))
+            logger.info(
+                "EasyNews NZB payload built title=%r selected_items=%s fields=%s",
+                d.get("title") or d.get("filename"),
+                len(release_items),
+                len(payload),
+            )
             content = c.download_nzb_content(payload)
+            logger.info(
+                "EasyNews NZB downloaded title=%r bytes=%s",
+                d.get("title") or d.get("filename"),
+                len(content),
+            )
         except EasynewsError as e:
+            logger.warning(
+                "EasyNews NZB download failed title=%r error=%s",
+                d.get("title") or d.get("filename"),
+                e,
+            )
             return Response(f"Upstream error: {e}", status=502)
         except requests.exceptions.RequestException as e:
+            logger.warning(
+                "EasyNews NZB network failure title=%r error=%s",
+                d.get("title") or d.get("filename"),
+                e,
+            )
             return Response(f"Upstream network error: {e}", status=502)
         # Name file as title.nzb
         title = d.get("title") or (d.get("filename", "download") + d.get("ext", ""))
