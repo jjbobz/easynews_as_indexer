@@ -73,6 +73,19 @@ Detection uses:
 - title markers such as `ebook`, `e-book`, `audiobook`, `audio book`
 - EasyNews group/category fields when they are present in the JSON response
 
+### Audiobook Track Grouping
+
+EasyNews can return audiobook releases as individual `.mp3` track files. For
+audiobook searches, the bridge now groups multiple matching track files into one
+Newznab release item when their normalized audiobook title matches.
+
+The grouped item:
+
+- has one RSS item/enclosure for Chaptarr to select
+- combines the sizes of all grouped tracks
+- encodes all member EasyNews files in the download ID
+- creates one NZB payload containing all grouped tracks when downloaded
+
 ### Size and Duration Filtering
 
 For book categories:
@@ -194,6 +207,7 @@ Expected EasyNews URL behavior in logs:
 Expected result behavior:
 
 - `.mp3` and `.m4b` results may be returned
+- multi-track `.mp3` audiobook results should be grouped into one release item
 - results should be categorized as `7040`
 
 ### Broad Books Search
@@ -266,6 +280,8 @@ Expected:
   unproven.
 - `.mp3` and `.m4b` results should be categorized as `3030` when Chaptarr uses
   the Audio category tree, or `7040` when it uses the Books category tree.
+- Multi-track `.mp3` audiobook results should appear as a single release item
+  instead of one hidden row per track.
 
 Limitations:
 
@@ -282,7 +298,8 @@ Limitations:
 - Live EasyNews behavior depends on how the EasyNews API classifies each post.
 - Audiobook-only `cat=7040` may miss archive/container posts that do not expose
   `.mp3` or `.m4b` as the indexed file extension.
-- Archive-based audiobook posts are not yet supported.
+- Archive-based audiobook posts are not yet supported unless EasyNews exposes
+  `.mp3` or `.m4b` files directly in the indexed result set.
 - The bridge does not yet inspect archive contents.
 - The bridge does not yet support additional book-related Newznab categories
   beyond `3000`, `3030`, `7000`, `7010`, and `7040`.

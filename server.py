@@ -88,13 +88,27 @@ def xml_escape(s: str) -> str:
 
 def encode_id(item: dict) -> str:
     # Pack info needed to build NZB for a single selection and preserve title for filename
-    payload = {
-        "hash": item.get("hash"),
-        "filename": item.get("filename"),
-        "ext": item.get("ext"),
-        "sig": item.get("sig"),
-        "title": item.get("title"),
-    }
+    if item.get("items"):
+        payload = {
+            "items": [
+                {
+                    "hash": child.get("hash"),
+                    "filename": child.get("filename"),
+                    "ext": child.get("ext"),
+                    "sig": child.get("sig"),
+                }
+                for child in item.get("items", [])
+            ],
+            "title": item.get("title"),
+        }
+    else:
+        payload = {
+            "hash": item.get("hash"),
+            "filename": item.get("filename"),
+            "ext": item.get("ext"),
+            "sig": item.get("sig"),
+            "title": item.get("title"),
+        }
     if item.get("sample"):
         payload["sample"] = True
     raw = (
@@ -121,6 +135,13 @@ def to_search_item(d: dict) -> SearchItem:
         type="VIDEO",
         raw={},
     )
+
+
+def to_search_items(d: dict) -> List[SearchItem]:
+    entries = d.get("items")
+    if isinstance(entries, list) and entries:
+        return [to_search_item(entry) for entry in entries]
+    return [to_search_item(d)]
 
 
 _TITLE_PARENS_RE = re.compile(r"\(([^()]*)\)")
@@ -250,6 +271,14 @@ _KNOWN_FANSUB_GROUPS = {
     "anime-time",
 }
 _SANITIZE_SYMBOLS_RE = re.compile(r"[\.\-_:\s]+")
+_AUDIOBOOK_TRACK_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:cd|disc|disk)\s*\d+[\s\._-]*)?(?:track\s*)?\d{1,4}[\s\._-]+",
+    re.IGNORECASE,
+)
+_AUDIOBOOK_TRAILING_PART_RE = re.compile(
+    r"[\s\._-]+(?:part|pt|track|chapter|ch)\s*\d{1,4}\s*$",
+    re.IGNORECASE,
+)
 _NON_ALNUM_RE = re.compile(r"[^\w\sÀ-ÿ]")
 
 # Newznab category constants
@@ -264,6 +293,7 @@ CATEGORY_TV_UHD = 5040
 CATEGORY_ANIME = 5070  # Anime as TV subcategory
 CATEGORY_BOOKS = 7000
 CATEGORY_EBOOK = 7010
+CATEGORY_EBOOK_STANDARD = 7020
 CATEGORY_AUDIOBOOK = 7040
 
 
@@ -351,7 +381,7 @@ def _requested_book_kinds(cat_param: str) -> Set[str]:
         kinds.add("audiobook")
     if "7000" in requested:
         kinds.update({"ebook", "audiobook"})
-    if "7010" in requested:
+    if requested & {"7010", "7020", "8010"}:
         kinds.add("ebook")
     if "7040" in requested:
         kinds.add("audiobook")
@@ -365,7 +395,9 @@ def _preferred_book_category(cat_param: str) -> Dict[str, int]:
         preferred["audiobook"] = CATEGORY_AUDIOBOOK_AUDIO
     elif requested & {"7000", "7040"}:
         preferred["audiobook"] = CATEGORY_AUDIOBOOK
-    if requested & {"7000", "7010"}:
+    if requested & {"7020", "8010"}:
+        preferred["ebook"] = CATEGORY_EBOOK_STANDARD
+    elif requested & {"7000", "7010"}:
         preferred["ebook"] = CATEGORY_EBOOK
     return preferred
 
@@ -410,6 +442,74 @@ def _detect_book_category(title: str, ext: Optional[str], group_text: str = "") 
     if "book" in haystack and normalized_ext in _ALLOWED_BOOK_EXTENSIONS:
         return CATEGORY_BOOKS
     return None
+
+
+def _audiobook_group_title(title: str) -> str:
+    working = re.sub(r"\.(mp3|m4b)$", "", title or "", flags=re.IGNORECASE)
+    previous = None
+    while previous != working:
+        previous = working
+        working = _AUDIOBOOK_TRACK_PREFIX_RE.sub("", working)
+    working = _AUDIOBOOK_TRAILING_PART_RE.sub("", working)
+    working = _SANITIZE_SYMBOLS_RE.sub(" ", working)
+    working = re.sub(r"\s+", " ", working).strip()
+    return working or title
+
+
+def _audiobook_group_key(title: str) -> str:
+    return _sanitize_phrase(_audiobook_group_title(title))
+
+
+def _group_audiobook_tracks(items: List[dict]) -> List[dict]:
+    grouped: Dict[str, List[dict]] = {}
+    passthrough: List[dict] = []
+    for item in items:
+        if _detect_book_category(
+            item.get("title", ""),
+            item.get("ext"),
+            item.get("groups", ""),
+        ) != CATEGORY_AUDIOBOOK:
+            passthrough.append(item)
+            continue
+        key = _audiobook_group_key(item.get("title", ""))
+        if not key:
+            passthrough.append(item)
+            continue
+        grouped.setdefault(key, []).append(item)
+
+    out = list(passthrough)
+    for group_items in grouped.values():
+        if len(group_items) == 1:
+            out.extend(group_items)
+            continue
+        group_items.sort(key=lambda item: item.get("title", ""))
+        first = group_items[0]
+        total_size = sum(int(item.get("size") or 0) for item in group_items)
+        title = _audiobook_group_title(first.get("title", "Audiobook"))
+        out.append(
+            {
+                "hash": first.get("hash"),
+                "filename": first.get("filename"),
+                "ext": first.get("ext"),
+                "sig": first.get("sig"),
+                "size": total_size,
+                "title": f"{title} ({len(group_items)} tracks)",
+                "poster": first.get("poster"),
+                "posted": first.get("posted"),
+                "duration": None,
+                "duration_hms": None,
+                "quality": first.get("quality") or "MP3",
+                "thumbnail": first.get("thumbnail"),
+                "groups": first.get("groups"),
+                "category_override": first.get("category_override"),
+                "year": first.get("year"),
+                "season": None,
+                "episode": None,
+                "items": group_items,
+            }
+        )
+    out.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
+    return out
 
 
 def _search_profile(t: str, cat_param: str) -> Dict[str, Any]:
@@ -900,6 +1000,7 @@ def api():
             "</category>"
             '<category id="7000" name="Books">'
             '<subcat id="7010" name="Books/EBook"/>'
+            '<subcat id="7020" name="Books/EBook"/>'
             '<subcat id="7040" name="Books/Audiobook"/>'
             "</category>"
             "</categories>"
@@ -1032,6 +1133,9 @@ def api():
                         "poster": "sample@example.com",
                         "posted": int(time.time()),
                         "groups": "alt.binaries.e-book",
+                        "category_override": profile["preferred_categories"].get(
+                            "ebook"
+                        ),
                     }
                 ]
             elif wants_anime:
@@ -1113,6 +1217,14 @@ def api():
                 len(data.get("data", [])),
                 len(items),
             )
+            if "audiobook" in profile["book_kinds"]:
+                before_grouping = len(items)
+                items = _group_audiobook_tracks(items)
+                logger.info(
+                    "Grouped audiobook results: before=%s after=%s",
+                    before_grouping,
+                    len(items),
+                )
 
         # Trim by limit (handles fallback and real queries)
         items = items[offset : offset + limit]
@@ -1233,10 +1345,9 @@ def api():
                 f'attachment; filename="{safe_title}.nzb"'
             )
             return resp
-        si = to_search_item(d)
         try:
             c = client()
-            payload = c.build_nzb_payload([si], name=d.get("title"))
+            payload = c.build_nzb_payload(to_search_items(d), name=d.get("title"))
             # fetch content
             url = "https://members.easynews.com/2.0/api/dl-nzb"
             r = c.s.post(url, data=payload, timeout=60)
