@@ -102,6 +102,7 @@ def encode_id(item: dict) -> str:
                     "groups": child.get("groups"),
                     "size": child.get("size"),
                     "title": child.get("title"),
+                    "language": child.get("language"),
                 }
                 for child in item.get("items", [])
             ],
@@ -110,6 +111,7 @@ def encode_id(item: dict) -> str:
             "poster": item.get("poster"),
             "groups": item.get("groups"),
             "size": item.get("size"),
+            "language": item.get("language"),
         }
     else:
         payload = {
@@ -122,6 +124,7 @@ def encode_id(item: dict) -> str:
             "poster": item.get("poster"),
             "groups": item.get("groups"),
             "size": item.get("size"),
+            "language": item.get("language"),
         }
     if item.get("sample"):
         payload["sample"] = True
@@ -500,6 +503,30 @@ def _detect_audiobook_quality(title: str, ext: Optional[str], group_text: str = 
     return "MP3"
 
 
+def _detect_language(title: str, group_text: str = "") -> Optional[str]:
+    haystack = _joined_text(title, group_text)
+    if any(
+        marker in haystack
+        for marker in (
+            "german",
+            "deutsch",
+            "deutsche",
+            "hoerbuch",
+            "hoerbuecher",
+            "hörbuch",
+            "hörbücher",
+            "ungekurzt",
+            "ungekürzt",
+            "mädchen",
+            "maedchen",
+        )
+    ):
+        return "de"
+    if any(marker in haystack for marker in ("english", "englisch")):
+        return "en"
+    return None
+
+
 def _audiobook_group_title(title: str) -> str:
     working = re.sub(r"\.(mp3|m4b|rar|zip|7z)$", "", title or "", flags=re.IGNORECASE)
     previous = None
@@ -525,6 +552,11 @@ def _normalize_creator_initials(text: str) -> str:
     return re.sub(r"\b((?:[A-Z]\s+){2,})([A-Z][a-z]+)\b", repl, text)
 
 
+def _space_creator_initials(text: str) -> str:
+    spaced = re.sub(r"\b([A-Z])\.(?=\s*[A-Z])", r"\1 ", text)
+    return re.sub(r"\s+", " ", spaced).strip()
+
+
 def _clean_audiobook_query_title(query: str) -> str:
     working = query or ""
     working = re.sub(
@@ -543,6 +575,48 @@ def _clean_audiobook_query_title(query: str) -> str:
     working = re.sub(r"\s+", " ", working).strip()
     working = _normalize_creator_initials(working)
     return working
+
+
+def _book_search_queries(raw_query: str, args: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+
+    def add(value: Optional[Any]) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    add(raw_query)
+    clean_query = _clean_audiobook_query_title(raw_query)
+    add(clean_query)
+    add(_space_creator_initials(clean_query))
+
+    author = (
+        args.get("author")
+        or args.get("authorname")
+        or args.get("authorName")
+        or args.get("artist")
+    )
+    title = (
+        args.get("book")
+        or args.get("booktitle")
+        or args.get("bookTitle")
+        or args.get("title")
+    )
+    series = args.get("series") or args.get("seriesTitle") or args.get("seriesname")
+    number = args.get("seriesnumber") or args.get("seriesNumber") or args.get("position")
+    if author and title:
+        add(f"{author} {title}")
+        add(f"{title} {author}")
+    if author and series:
+        add(f"{author} {series}")
+    if author and series and number:
+        add(f"{author} {series} {number}")
+        try:
+            add(f"{author} {series} {int(str(number)):02d}")
+        except ValueError:
+            pass
+
+    return candidates
 
 
 def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[dict]:
@@ -577,6 +651,10 @@ def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[di
             first.get("ext"),
             first.get("groups", ""),
         )
+        language = first.get("language") or _detect_language(
+            first.get("title", ""),
+            first.get("groups", ""),
+        )
         out.append(
             {
                 "hash": first.get("hash"),
@@ -590,6 +668,7 @@ def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[di
                 "duration": None,
                 "duration_hms": None,
                 "quality": quality,
+                "language": language,
                 "thumbnail": first.get("thumbnail"),
                 "groups": first.get("groups"),
                 "category_override": first.get("category_override"),
@@ -742,6 +821,10 @@ def _details_html(release: dict) -> str:
         entries = [release]
     posted_dt = _coerce_datetime(release.get("posted"))
     posted = posted_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if posted_dt else ""
+    language = release.get("language") or _detect_language(
+        str(title),
+        release.get("groups") or entries[0].get("groups") or "",
+    )
     raw_groups = release.get("groups") or entries[0].get("groups") or ""
     group_rows = "".join(
         f"<li>{html.escape(group.strip())}</li>"
@@ -759,6 +842,10 @@ def _details_html(release: dict) -> str:
             if entry_posted_dt
             else ""
         )
+        entry_language = entry.get("language") or _detect_language(
+            str(entry_title or ""),
+            entry.get("groups") or raw_groups,
+        )
         file_rows.append(
             "<tr>"
             f"<td>{idx}</td>"
@@ -767,6 +854,7 @@ def _details_html(release: dict) -> str:
             f"<td>{html.escape(_format_size(entry.get('size')))}</td>"
             f"<td>{html.escape(entry_posted)}</td>"
             f"<td>{html.escape(str(entry.get('poster') or ''))}</td>"
+            f"<td>{html.escape(str(entry_language or ''))}</td>"
             "</tr>"
         )
     easynews_url = _easynews_details_url(str(title))
@@ -791,10 +879,11 @@ def _details_html(release: dict) -> str:
         f"<div class='label'>Size</div><div>{html.escape(_format_size(release.get('size')))}</div>"
         f"<div class='label'>Posted</div><div>{html.escape(posted)}</div>"
         f"<div class='label'>Poster</div><div>{html.escape(str(release.get('poster') or ''))}</div>"
+        f"<div class='label'>Language</div><div>{html.escape(str(language or ''))}</div>"
         f"<div class='label'>Groups</div><div><ul>{group_rows}</ul></div>"
         f"<div class='label'>EasyNews search</div><div><a href='{html.escape(easynews_url)}'>Open raw EasyNews search</a></div>"
         "</div>"
-        "<table><thead><tr><th>#</th><th>File</th><th>Ext</th><th>Size</th><th>Posted</th><th>Poster</th></tr></thead>"
+        "<table><thead><tr><th>#</th><th>File</th><th>Ext</th><th>Size</th><th>Posted</th><th>Poster</th><th>Language</th></tr></thead>"
         f"<tbody>{''.join(file_rows)}</tbody></table>"
         "</body></html>"
     )
@@ -1113,6 +1202,7 @@ def filter_and_map(
         duration_formatted = _format_duration(duration_seconds)
         thumbnail_url = _build_thumbnail_url(thumb_base, hash_id, filename_no_ext)
         year = title_meta.get("year")
+        language = _detect_language(title, group_text)
 
         out.append(
             {
@@ -1127,6 +1217,7 @@ def filter_and_map(
                 "duration": duration_seconds,
                 "duration_hms": duration_formatted,
                 "quality": quality,
+                "language": language,
                 "thumbnail": thumbnail_url,
                 "groups": group_text,
                 "category_override": category_override,
@@ -1370,43 +1461,58 @@ def api():
                 ]
         else:
             c = client()
-            # aim for maximum results per page
-            data = c.search(
-                query=q,
-                file_type=None,
-                file_types=profile["file_types"],
-                per_page=250,
-                sort_field="relevance",
-                sort_dir="-",
+            search_queries = (
+                _book_search_queries(q, dict(request.args))
+                if profile["kind"] == "books"
+                else [q]
             )
-            if fallback_query:
-                items = filter_and_map(data, min_bytes=min_bytes)
-            else:
-                items = filter_and_map(
-                    data,
-                    min_bytes=min_bytes,
-                    query_tokens=filter_query_tokens,
-                    query_meta=query_meta,
-                    strict_phrase=strict_phrase,
-                    strict_match=strict_requested,
-                    allowed_extensions=profile["allowed_extensions"],
-                    allowed_file_types=profile["allowed_file_types"],
-                    enforce_min_duration=profile["enforce_min_duration"],
-                    book_kinds=profile["book_kinds"],
-                    preferred_categories=profile["preferred_categories"],
+            items = []
+            data = {"data": []}
+            used_query = q
+            for search_query in search_queries:
+                # aim for maximum results per page
+                data = c.search(
+                    query=search_query,
+                    file_type=None,
+                    file_types=profile["file_types"],
+                    per_page=250,
+                    sort_field="relevance",
+                    sort_dir="-",
                 )
-            logger.info(
-                "Mapped Easynews results: query=%r category_profile=%s returned=%s mapped=%s",
-                q,
-                profile["kind"],
-                len(data.get("data", [])),
-                len(items),
-            )
+                if fallback_query:
+                    mapped_items = filter_and_map(data, min_bytes=min_bytes)
+                else:
+                    mapped_items = filter_and_map(
+                        data,
+                        min_bytes=min_bytes,
+                        query_tokens=filter_query_tokens,
+                        query_meta=query_meta,
+                        strict_phrase=strict_phrase,
+                        strict_match=strict_requested,
+                        allowed_extensions=profile["allowed_extensions"],
+                        allowed_file_types=profile["allowed_file_types"],
+                        enforce_min_duration=profile["enforce_min_duration"],
+                        book_kinds=profile["book_kinds"],
+                        preferred_categories=profile["preferred_categories"],
+                    )
+                logger.info(
+                    "Mapped Easynews results: query=%r search_query=%r category_profile=%s returned=%s mapped=%s",
+                    q,
+                    search_query,
+                    profile["kind"],
+                    len(data.get("data", [])),
+                    len(mapped_items),
+                )
+                if mapped_items or profile["kind"] != "books":
+                    items = mapped_items
+                    used_query = search_query
+                    break
             if "audiobook" in profile["book_kinds"]:
                 before_grouping = len(items)
                 items = _group_audiobook_tracks(items, raw_query)
                 logger.info(
-                    "Grouped audiobook results: before=%s after=%s",
+                    "Grouped audiobook results: search_query=%r before=%s after=%s",
+                    used_query,
                     before_grouping,
                     len(items),
                 )
@@ -1445,6 +1551,7 @@ def api():
             posted_epoch = str(int(posted_dt.timestamp()))
             duration_hms = it.get("duration_hms")
             quality = it.get("quality")
+            language = it.get("language")
             thumb = it.get("thumbnail")
             year = it.get("year")
             season = it.get("season")
@@ -1480,6 +1587,10 @@ def api():
             if quality:
                 attr_parts.append(
                     f'<newznab:attr name="quality" value="{xml_escape(quality)}"/>'
+                )
+            if language:
+                attr_parts.append(
+                    f'<newznab:attr name="language" value="{xml_escape(language)}"/>'
                 )
             if duration_hms:
                 attr_parts.append(
