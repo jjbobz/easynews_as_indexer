@@ -1348,15 +1348,11 @@ def api():
         try:
             c = client()
             payload = c.build_nzb_payload(to_search_items(d), name=d.get("title"))
-            # fetch content
-            url = "https://members.easynews.com/2.0/api/dl-nzb"
-            r = c.s.post(url, data=payload, timeout=60)
+            content = c.download_nzb_content(payload)
         except EasynewsError as e:
             return Response(f"Upstream error: {e}", status=502)
         except requests.exceptions.RequestException as e:
             return Response(f"Upstream network error: {e}", status=502)
-        if r.status_code != 200:
-            return Response(f"Upstream error {r.status_code}", status=502)
         # Name file as title.nzb
         title = d.get("title") or (d.get("filename", "download") + d.get("ext", ""))
         safe_title = (
@@ -1365,7 +1361,7 @@ def api():
             ].strip()
             or "download"
         )
-        resp = Response(r.content, mimetype="application/x-nzb")
+        resp = Response(content, mimetype="application/x-nzb")
         resp.headers["Content-Disposition"] = f'attachment; filename="{safe_title}.nzb"'
         return resp
 

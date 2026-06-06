@@ -14,17 +14,21 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import ChunkedEncodingError, ConnectionError, RequestException, ReadTimeout
 
 
 EASYNEWS_BASE = "https://members.easynews.com"
-_LOGIN_TIMEOUT = 15
-_SEARCH_TIMEOUT = 30
-_DOWNLOAD_TIMEOUT = 60
+_CONNECT_TIMEOUT = 10
+_LOGIN_TIMEOUT = (_CONNECT_TIMEOUT, 30)
+_SEARCH_TIMEOUT = (_CONNECT_TIMEOUT, 60)
+_DOWNLOAD_TIMEOUT = (_CONNECT_TIMEOUT, 60)
+_RETRY_ATTEMPTS = 3
+_TRANSIENT_REQUEST_ERRORS = (ReadTimeout, ConnectionError, ChunkedEncodingError)
 logger = logging.getLogger(__name__)
 
 
@@ -71,15 +75,43 @@ class EasynewsClient:
         # Use HTTP Basic Auth for endpoints that support it
         self.s.auth = (self.username, self.password)
 
+    def _request_with_retries(
+        self, method: str, url: str, purpose: str, **kwargs: Any
+    ) -> requests.Response:
+        last_error: Optional[RequestException] = None
+        for attempt in range(_RETRY_ATTEMPTS):
+            try:
+                return self.s.request(method, url, **kwargs)
+            except _TRANSIENT_REQUEST_ERRORS as e:
+                last_error = e
+                logger.warning(
+                    "EasyNews %s failed attempt %s/%s: %s",
+                    purpose,
+                    attempt + 1,
+                    _RETRY_ATTEMPTS,
+                    e,
+                )
+                if attempt < _RETRY_ATTEMPTS - 1:
+                    time.sleep(2 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
     def login(self) -> None:
         """
         Prime session and validate credentials using a quick authenticated call.
         This relies on HTTP Basic Auth configured on the session.
         """
         try:
-            self.s.get(f"{EASYNEWS_BASE}/2.0/", timeout=_LOGIN_TIMEOUT)
-            check = self.s.get(
+            self._request_with_retries(
+                "GET",
+                f"{EASYNEWS_BASE}/2.0/",
+                "login",
+                timeout=_LOGIN_TIMEOUT,
+            )
+            check = self._request_with_retries(
+                "GET",
                 f"{EASYNEWS_BASE}/2.0/search/solr-search/?fly=2&gps=test&sb=1&pno=1&pby=1&u=1&chxu=1&chxgx=1&st=basic&s1=dtime&s1d=-&sS=3&vv=1&fty%5B%5D=VIDEO",
+                "login validation",
                 allow_redirects=True,
                 timeout=_LOGIN_TIMEOUT,
             )
@@ -143,7 +175,9 @@ class EasynewsClient:
 
         logger.info("Easynews search URL: %s", full_url)
         try:
-            r = self.s.get(full_url, timeout=_SEARCH_TIMEOUT)
+            r = self._request_with_retries(
+                "GET", full_url, "search", timeout=_SEARCH_TIMEOUT
+            )
             r.raise_for_status()
             data = r.json()
         except RequestException as e:
@@ -224,9 +258,23 @@ class EasynewsClient:
         return data
 
     def download_nzb(self, payload: Dict[str, str], out_path: str) -> str:
+        content = self.download_nzb_content(payload)
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(content)
+        return out_path
+
+    def download_nzb_content(self, payload: Dict[str, str]) -> bytes:
         url = f"{EASYNEWS_BASE}/2.0/api/dl-nzb"
         try:
-            r = self.s.post(url, data=payload, stream=True, timeout=_DOWNLOAD_TIMEOUT)
+            r = self._request_with_retries(
+                "POST",
+                url,
+                "NZB download",
+                data=payload,
+                stream=True,
+                timeout=_DOWNLOAD_TIMEOUT,
+            )
         except RequestException as e:
             logger.exception("NZB download request failed")
             raise EasynewsError(f"NZB download request failed: {e}") from e
@@ -238,13 +286,9 @@ class EasynewsClient:
             # Sometimes returns text/html with a redirect page; still try to save
             pass
 
-        content = r.content.replace(
+        return r.content.replace(
             b'date=""', b'date="0"'
         )  # normalize empty NZB date fields
-        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-        with open(out_path, "wb") as f:
-            f.write(content)
-        return out_path
 
     def search_and_nzb(
         self,
