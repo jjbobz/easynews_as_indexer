@@ -328,6 +328,7 @@ _AUDIOBOOK_TRAILING_PART_RE = re.compile(
     r"[\s\._-]+(?:part|pt|track|chapter|ch)\s*\d{1,4}\s*$",
     re.IGNORECASE,
 )
+_AUDIOBOOK_TRAILING_NUMBER_RE = re.compile(r"[\s\._-]+\d{1,4}\s*$")
 _NON_ALNUM_RE = re.compile(r"[^\w\sÀ-ÿ]")
 
 # Newznab category constants
@@ -534,6 +535,7 @@ def _audiobook_group_title(title: str) -> str:
         previous = working
         working = _AUDIOBOOK_TRACK_PREFIX_RE.sub("", working)
     working = _AUDIOBOOK_TRAILING_PART_RE.sub("", working)
+    working = _AUDIOBOOK_TRAILING_NUMBER_RE.sub("", working)
     working = _SANITIZE_SYMBOLS_RE.sub(" ", working)
     working = re.sub(r"\s+", " ", working).strip()
     return working or title
@@ -639,9 +641,6 @@ def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[di
 
     out = list(passthrough)
     for group_items in grouped.values():
-        if len(group_items) == 1:
-            out.extend(group_items)
-            continue
         group_items.sort(key=lambda item: item.get("title", ""))
         first = group_items[0]
         total_size = sum(int(item.get("size") or 0) for item in group_items)
@@ -662,7 +661,9 @@ def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[di
                 "ext": first.get("ext"),
                 "sig": first.get("sig"),
                 "size": total_size,
-                "title": f"{title} {quality} ({len(group_items)} tracks)",
+                "title": f"{title} {quality} ({len(group_items)} tracks)"
+                if len(group_items) > 1
+                else f"{title} {quality}",
                 "poster": first.get("poster"),
                 "posted": first.get("posted"),
                 "duration": None,
