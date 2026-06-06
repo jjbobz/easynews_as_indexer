@@ -214,7 +214,16 @@ _ALLOWED_AUDIOBOOK_EXTENSIONS = {
     ".mp3",
     ".m4b",
 }
-_ALLOWED_BOOK_EXTENSIONS = _ALLOWED_EBOOK_EXTENSIONS | _ALLOWED_AUDIOBOOK_EXTENSIONS
+_ALLOWED_BOOK_ARCHIVE_EXTENSIONS = {
+    ".rar",
+    ".zip",
+    ".7z",
+}
+_ALLOWED_BOOK_EXTENSIONS = (
+    _ALLOWED_EBOOK_EXTENSIONS
+    | _ALLOWED_AUDIOBOOK_EXTENSIONS
+    | _ALLOWED_BOOK_ARCHIVE_EXTENSIONS
+)
 
 _STOPWORDS = {
     "the",
@@ -444,8 +453,18 @@ def _detect_book_category(title: str, ext: Optional[str], group_text: str = "") 
     return None
 
 
+def _detect_audiobook_quality(title: str, ext: Optional[str], group_text: str = "") -> str:
+    normalized_ext = _normalize_ext(ext)
+    haystack = _joined_text(title, group_text)
+    if normalized_ext == ".m4b" or "m4b" in haystack:
+        return "M4B"
+    if normalized_ext == ".mp3" or "mp3" in haystack:
+        return "MP3"
+    return "MP3"
+
+
 def _audiobook_group_title(title: str) -> str:
-    working = re.sub(r"\.(mp3|m4b)$", "", title or "", flags=re.IGNORECASE)
+    working = re.sub(r"\.(mp3|m4b|rar|zip|7z)$", "", title or "", flags=re.IGNORECASE)
     previous = None
     while previous != working:
         previous = working
@@ -486,6 +505,11 @@ def _group_audiobook_tracks(items: List[dict]) -> List[dict]:
         first = group_items[0]
         total_size = sum(int(item.get("size") or 0) for item in group_items)
         title = _audiobook_group_title(first.get("title", "Audiobook"))
+        quality = first.get("quality") or _detect_audiobook_quality(
+            first.get("title", ""),
+            first.get("ext"),
+            first.get("groups", ""),
+        )
         out.append(
             {
                 "hash": first.get("hash"),
@@ -493,12 +517,12 @@ def _group_audiobook_tracks(items: List[dict]) -> List[dict]:
                 "ext": first.get("ext"),
                 "sig": first.get("sig"),
                 "size": total_size,
-                "title": f"{title} ({len(group_items)} tracks)",
+                "title": f"{title} {quality} ({len(group_items)} tracks)",
                 "poster": first.get("poster"),
                 "posted": first.get("posted"),
                 "duration": None,
                 "duration_hms": None,
-                "quality": first.get("quality") or "MP3",
+                "quality": quality,
                 "thumbnail": first.get("thumbnail"),
                 "groups": first.get("groups"),
                 "category_override": first.get("category_override"),
@@ -518,9 +542,13 @@ def _search_profile(t: str, cat_param: str) -> Dict[str, Any]:
         allowed_extensions: Set[str] = set()
         file_types: List[str] = []
         if "ebook" in book_kinds:
-            allowed_extensions.update(_ALLOWED_EBOOK_EXTENSIONS)
+            allowed_extensions.update(
+                _ALLOWED_EBOOK_EXTENSIONS | _ALLOWED_BOOK_ARCHIVE_EXTENSIONS
+            )
         if "audiobook" in book_kinds:
-            allowed_extensions.update(_ALLOWED_AUDIOBOOK_EXTENSIONS)
+            allowed_extensions.update(
+                _ALLOWED_AUDIOBOOK_EXTENSIONS | _ALLOWED_BOOK_ARCHIVE_EXTENSIONS
+            )
             # EasyNews audiobook posts may be header/newsgroup based, and
             # fty[]=AUDIO is not proven to cover all audiobook releases.
         return {
