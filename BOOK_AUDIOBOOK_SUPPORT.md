@@ -41,7 +41,7 @@ Search behavior now depends on the requested Newznab category:
 - Movie/TV searches still use `fty[]=VIDEO`.
 - Generic video searches without book categories still use `fty[]=VIDEO`.
 - EBook searches, `cat=7010`, do not force `fty[]=VIDEO`.
-- Audiobook searches, `cat=7040`, use `fty[]=AUDIO`.
+- Audiobook searches, `cat=7040`, do not force an EasyNews file type filter.
 - Top-level Books searches, `cat=7000`, do not force a file type filter so both
   ebook and audiobook candidates can be seen.
 
@@ -170,8 +170,9 @@ Invoke-WebRequest "http://127.0.0.1:8081/api?t=search&q=Dungeon%20Crawler%20Carl
 
 Expected EasyNews URL behavior in logs:
 
-- `fty%5B%5D=AUDIO`
 - no `fty%5B%5D=VIDEO`
+- no `fty%5B%5D=AUDIO`
+- no forced single media type
 
 Expected result behavior:
 
@@ -240,26 +241,27 @@ categories.
 Expected:
 
 - Audiobook searches should use `cat=7040` or possibly top-level `cat=7000`.
-- `cat=7040` searches should send `fty[]=AUDIO`.
-- `cat=7000` searches should avoid a forced EasyNews media type and may be more
-  useful when EasyNews does not classify an audiobook post as `AUDIO`.
+- `cat=7040` and `cat=7000` searches should avoid a forced EasyNews media type.
+- The bridge intentionally avoids `fty[]=AUDIO` by default because EasyNews
+  audiobook posts may be header/newsgroup based and `AUDIO` coverage is
+  unproven.
 - `.mp3` and `.m4b` results should be categorized as `7040`.
 
 Limitations:
 
 - Audiobook posts that appear on the EasyNews website as `.rar`, `.zip`, `.7z`,
   split archives, or other container formats are still likely to be filtered out.
-- If an audiobook is visible on the website but not returned with
-  `fty[]=AUDIO`, try testing with `cat=7000` to see whether the broader Books
-  search exposes it.
+- If an audiobook is visible on the website but not returned through `cat=7040`,
+  try testing with `cat=7000` to see whether the broader Books search exposes
+  it.
 - If EasyNews only exposes group data in a list format without newsgroup fields,
   title and extension detection become the primary signals.
 
 ## Known Remaining Gaps
 
 - Live EasyNews behavior depends on how the EasyNews API classifies each post.
-- Audiobook-only `cat=7040` may miss posts that are audiobooks but not typed as
-  `AUDIO` by EasyNews.
+- Audiobook-only `cat=7040` may miss archive/container posts that do not expose
+  `.mp3` or `.m4b` as the indexed file extension.
 - Archive-based audiobook posts are not yet supported.
 - The bridge does not yet inspect archive contents.
 - The bridge does not yet support additional book-related Newznab categories
