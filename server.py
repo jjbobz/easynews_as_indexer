@@ -560,6 +560,17 @@ def _space_creator_initials(text: str) -> str:
 
 
 def _move_trailing_creator_to_front(text: str) -> str:
+    byline_match = re.search(
+        r"^(?P<title>.+?)\s+(?:by|author)\s+(?P<author>[A-Z][A-Za-z' .-]+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if byline_match:
+        title = byline_match.group("title").strip()
+        author = _normalize_creator_initials(byline_match.group("author").strip())
+        if title and author:
+            return f"{author} {title}"
+
     match = re.search(
         r"^(?P<title>.+?)\s+(?P<author>(?:[A-Z]\.\s*){2,3}[A-Z][a-z]+|(?:[A-Z]\s+){2,3}[A-Z][a-z]+)$",
         text,
@@ -594,6 +605,65 @@ def _clean_audiobook_query_title(query: str) -> str:
     return working
 
 
+def _get_book_author_title_args(args: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    author = (
+        args.get("author")
+        or args.get("authorname")
+        or args.get("authorName")
+        or args.get("artist")
+    )
+    title = (
+        args.get("book")
+        or args.get("booktitle")
+        or args.get("bookTitle")
+        or args.get("title")
+    )
+    return (
+        str(author).strip() if author else None,
+        str(title).strip() if title else None,
+    )
+
+
+def _audiobook_display_query(raw_query: str, args: Dict[str, Any]) -> str:
+    author, title = _get_book_author_title_args(args)
+    if author and title:
+        return _clean_audiobook_query_title(f"{author} {title}")
+    return _clean_audiobook_query_title(raw_query)
+
+
+def _split_leading_creator(text: str) -> Optional[tuple[str, str]]:
+    match = re.match(
+        r"^(?P<author>(?:[A-Z]\.\s*){2,3}[A-Z][a-z]+)\s+(?P<title>.+)$",
+        text,
+    )
+    if not match:
+        return None
+    return match.group("author").strip(), match.group("title").strip()
+
+
+def _article_insensitive_tokens(text: str) -> List[str]:
+    return [
+        token
+        for token in _tokenize(text)
+        if token not in {"the", "a", "an"}
+    ]
+
+
+def _merge_query_author_with_source_title(query_title: str, source_title: str) -> str:
+    split = _split_leading_creator(query_title)
+    if not split or not source_title:
+        return query_title or source_title
+    author, query_book_title = split
+    source_book_title = source_title.strip()
+    if (
+        _article_insensitive_tokens(query_book_title)
+        == _article_insensitive_tokens(source_book_title)
+        and source_book_title.lower() != query_book_title.lower()
+    ):
+        return f"{author} {source_book_title}"
+    return query_title
+
+
 def _book_search_queries(raw_query: str, args: Dict[str, Any]) -> List[str]:
     candidates: List[str] = []
 
@@ -607,18 +677,7 @@ def _book_search_queries(raw_query: str, args: Dict[str, Any]) -> List[str]:
     add(clean_query)
     add(_space_creator_initials(clean_query))
 
-    author = (
-        args.get("author")
-        or args.get("authorname")
-        or args.get("authorName")
-        or args.get("artist")
-    )
-    title = (
-        args.get("book")
-        or args.get("booktitle")
-        or args.get("bookTitle")
-        or args.get("title")
-    )
+    author, title = _get_book_author_title_args(args)
     series = args.get("series") or args.get("seriesTitle") or args.get("seriesname")
     number = args.get("seriesnumber") or args.get("seriesNumber") or args.get("position")
     if author and title:
@@ -659,7 +718,12 @@ def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[di
         group_items.sort(key=lambda item: item.get("title", ""))
         first = group_items[0]
         total_size = sum(int(item.get("size") or 0) for item in group_items)
-        title = clean_query_title or _audiobook_group_title(first.get("title", "Audiobook"))
+        source_title = _audiobook_group_title(first.get("title", "Audiobook"))
+        title = (
+            _merge_query_author_with_source_title(clean_query_title, source_title)
+            if clean_query_title
+            else source_title
+        )
         quality = first.get("quality") or _detect_audiobook_quality(
             first.get("title", ""),
             first.get("ext"),
@@ -1525,7 +1589,11 @@ def api():
                     break
             if "audiobook" in profile["book_kinds"]:
                 before_grouping = len(items)
-                items = _group_audiobook_tracks(items, raw_query)
+                display_query_title = _audiobook_display_query(
+                    raw_query,
+                    dict(request.args),
+                )
+                items = _group_audiobook_tracks(items, display_query_title)
                 logger.info(
                     "Grouped audiobook results: search_query=%r before=%s after=%s",
                     used_query,
