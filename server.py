@@ -1274,6 +1274,9 @@ def api():
             except ValueError:
                 min_size_mb = profile["default_min_size_mb"]
         min_bytes = min_size_mb * 1024 * 1024
+        filter_query_tokens = (
+            None if profile["kind"] == "books" else query_tokens
+        )
 
         if fallback_query:
             # Check if TV/Anime categories are requested
@@ -1382,7 +1385,7 @@ def api():
                 items = filter_and_map(
                     data,
                     min_bytes=min_bytes,
-                    query_tokens=query_tokens,
+                    query_tokens=filter_query_tokens,
                     query_meta=query_meta,
                     strict_phrase=strict_phrase,
                     strict_match=strict_requested,
