@@ -97,10 +97,12 @@ def encode_id(item: dict) -> str:
                     "filename": child.get("filename"),
                     "ext": child.get("ext"),
                     "sig": child.get("sig"),
+                    "posted": child.get("posted"),
                 }
                 for child in item.get("items", [])
             ],
             "title": item.get("title"),
+            "posted": item.get("posted"),
         }
     else:
         payload = {
@@ -109,6 +111,7 @@ def encode_id(item: dict) -> str:
             "ext": item.get("ext"),
             "sig": item.get("sig"),
             "title": item.get("title"),
+            "posted": item.get("posted"),
         }
     if item.get("sample"):
         payload["sample"] = True
@@ -136,6 +139,28 @@ def to_search_item(d: dict) -> SearchItem:
         sig=d.get("sig"),
         type="VIDEO",
         raw={},
+    )
+
+
+def _posted_epoch(*items: dict) -> Optional[int]:
+    epochs: List[int] = []
+    for item in items:
+        posted = _coerce_datetime(item.get("posted"))
+        if posted is not None:
+            epochs.append(int(posted.timestamp()))
+    if not epochs:
+        return None
+    return max(epochs)
+
+
+def _normalize_nzb_dates(content: bytes, posted_epoch: Optional[int]) -> bytes:
+    if posted_epoch is None:
+        return content.replace(b'date=""', b'date="0"')
+    epoch = str(posted_epoch).encode("ascii")
+    return re.sub(
+        rb'(<file\b[^>]*\bdate=")([^"]*)(")',
+        rb"\g<1>" + epoch + rb"\3",
+        content,
     )
 
 
@@ -1385,13 +1410,16 @@ def api():
         try:
             c = client()
             payload = c.build_nzb_payload(release_items, name=d.get("title"))
+            posted_epoch = _posted_epoch(d, *d.get("items", []))
             logger.info(
-                "EasyNews NZB payload built title=%r selected_items=%s fields=%s",
+                "EasyNews NZB payload built title=%r selected_items=%s fields=%s posted_epoch=%s",
                 d.get("title") or d.get("filename"),
                 len(release_items),
                 len(payload),
+                posted_epoch,
             )
             content = c.download_nzb_content(payload)
+            content = _normalize_nzb_dates(content, posted_epoch)
             logger.info(
                 "EasyNews NZB downloaded title=%r bytes=%s",
                 d.get("title") or d.get("filename"),
