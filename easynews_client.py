@@ -282,13 +282,22 @@ class EasynewsClient:
             raise EasynewsError(f"NZB creation failed: HTTP {r.status_code}")
 
         content_type = r.headers.get("Content-Type", "")
-        if "xml" not in content_type and "nzb" not in content_type:
-            # Sometimes returns text/html with a redirect page; still try to save
-            pass
-
-        return r.content.replace(
+        content = r.content.replace(
             b'date=""', b'date="0"'
         )  # normalize empty NZB date fields
+        stripped = content.lstrip()
+        if (
+            "xml" not in content_type
+            and "nzb" not in content_type
+            and not stripped.startswith((b"<?xml", b"<nzb"))
+        ):
+            snippet = stripped[:160].decode("utf-8", errors="replace")
+            raise EasynewsError(
+                "NZB creation returned non-NZB content: "
+                f"content_type={content_type!r} bytes={len(content)} body={snippet!r}"
+            )
+
+        return content
 
     def search_and_nzb(
         self,

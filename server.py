@@ -1167,6 +1167,8 @@ def filter_and_map(
                 subject = it[6]
                 filename_no_ext = it[10]
                 ext = it[11]
+            if len(it) > 13 and it[13]:
+                sig = str(it[13])
             if len(it) > 7:
                 poster = it[7]
             if len(it) > 8:
@@ -1713,13 +1715,22 @@ def api():
         enc_id = request.args.get("id")
         if not enc_id:
             return Response("Missing id", status=400)
-        d = decode_id(enc_id)
-        release_items = to_search_items(d)
+        try:
+            d = decode_id(enc_id)
+            release_items = to_search_items(d)
+        except Exception as e:
+            logger.warning(
+                "NEWZNAB get release decode failed id_length=%s error=%s",
+                len(enc_id),
+                e,
+            )
+            return Response("Invalid release id", status=400)
         logger.info(
-            "NEWZNAB get release title=%r grouped_items=%s id_length=%s",
+            "NEWZNAB get release title=%r grouped_items=%s id_length=%s signed_items=%s",
             d.get("title") or d.get("filename"),
             len(release_items),
             len(enc_id),
+            sum(1 for item in release_items if item.sig),
         )
         if d.get("sample"):
             title = d.get("title", "Sample Item")
@@ -1742,10 +1753,11 @@ def api():
             payload = c.build_nzb_payload(release_items, name=d.get("title"))
             posted_epoch = _posted_epoch(d, *d.get("items", []))
             logger.info(
-                "EasyNews NZB payload built title=%r selected_items=%s fields=%s posted_epoch=%s",
+                "EasyNews NZB payload built title=%r selected_items=%s fields=%s signed_items=%s posted_epoch=%s",
                 d.get("title") or d.get("filename"),
                 len(release_items),
                 len(payload),
+                sum(1 for item in release_items if item.sig),
                 posted_epoch,
             )
             content = c.download_nzb_content(payload)
