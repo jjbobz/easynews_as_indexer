@@ -256,6 +256,8 @@ _NON_ALNUM_RE = re.compile(r"[^\w\sÀ-ÿ]")
 CATEGORY_MOVIES = 2000
 CATEGORY_MOVIES_HD = 2030
 CATEGORY_MOVIES_UHD = 2040
+CATEGORY_AUDIO = 3000
+CATEGORY_AUDIOBOOK_AUDIO = 3030
 CATEGORY_TV = 5000
 CATEGORY_TV_HD = 5030
 CATEGORY_TV_UHD = 5040
@@ -345,6 +347,8 @@ def _split_categories(cat_param: str) -> Set[str]:
 def _requested_book_kinds(cat_param: str) -> Set[str]:
     requested = _split_categories(cat_param)
     kinds: Set[str] = set()
+    if requested & {"3000", "3030"}:
+        kinds.add("audiobook")
     if "7000" in requested:
         kinds.update({"ebook", "audiobook"})
     if "7010" in requested:
@@ -352,6 +356,18 @@ def _requested_book_kinds(cat_param: str) -> Set[str]:
     if "7040" in requested:
         kinds.add("audiobook")
     return kinds
+
+
+def _preferred_book_category(cat_param: str) -> Dict[str, int]:
+    requested = _split_categories(cat_param)
+    preferred: Dict[str, int] = {}
+    if requested & {"3000", "3030"}:
+        preferred["audiobook"] = CATEGORY_AUDIOBOOK_AUDIO
+    elif requested & {"7000", "7040"}:
+        preferred["audiobook"] = CATEGORY_AUDIOBOOK
+    if requested & {"7000", "7010"}:
+        preferred["ebook"] = CATEGORY_EBOOK
+    return preferred
 
 
 def _joined_text(*values: Optional[Any]) -> str:
@@ -410,6 +426,7 @@ def _search_profile(t: str, cat_param: str) -> Dict[str, Any]:
         return {
             "kind": "books",
             "book_kinds": book_kinds,
+            "preferred_categories": _preferred_book_category(cat_param),
             "allowed_extensions": allowed_extensions or _ALLOWED_BOOK_EXTENSIONS,
             "allowed_file_types": None,
             "file_types": file_types,
@@ -419,6 +436,7 @@ def _search_profile(t: str, cat_param: str) -> Dict[str, Any]:
     return {
         "kind": "video",
         "book_kinds": set(),
+        "preferred_categories": {},
         "allowed_extensions": _ALLOWED_VIDEO_EXTENSIONS,
         "allowed_file_types": {"VIDEO"},
         "file_types": ["VIDEO"],
@@ -670,9 +688,11 @@ def filter_and_map(
     allowed_file_types: Optional[Set[str]] = None,
     enforce_min_duration: bool = True,
     book_kinds: Optional[Set[str]] = None,
+    preferred_categories: Optional[Dict[str, int]] = None,
 ) -> List[dict]:
     token_set: Set[str] = set(query_tokens or [])
     wanted_book_kinds = set(book_kinds or [])
+    category_preferences = preferred_categories or {}
     thumb_base = json_data.get("thumbURL") or json_data.get("thumbUrl")
     out: List[dict] = []
     for it in json_data.get("data", []):
@@ -773,6 +793,9 @@ def filter_and_map(
                 continue
             if item_book_kind not in wanted_book_kinds:
                 continue
+            category_override = category_preferences.get(item_book_kind)
+        else:
+            category_override = None
 
         quality = _extract_quality(title, fullres)
         title_meta = _extract_release_markers(title, quality)
@@ -824,6 +847,7 @@ def filter_and_map(
                 "quality": quality,
                 "thumbnail": thumbnail_url,
                 "groups": group_text,
+                "category_override": category_override,
                 "year": year,
                 "season": title_meta.get("season"),
                 "episode": title_meta.get("episode"),
@@ -862,6 +886,9 @@ def api():
             '<tv-search available="yes" supportedParams="q,season,ep"/>'
             "</searching>"
             "<categories>"
+            '<category id="3000" name="Audio">'
+            '<subcat id="3030" name="Audio/Audiobook"/>'
+            "</category>"
             '<category id="2000" name="Movies">'
             '<subcat id="2030" name="Movies/HD"/>'
             '<subcat id="2040" name="Movies/UHD"/>'
@@ -987,6 +1014,9 @@ def api():
                         "poster": "sample@example.com",
                         "posted": int(time.time()),
                         "groups": "alt.binaries.audiobooks",
+                        "category_override": profile["preferred_categories"].get(
+                            "audiobook"
+                        ),
                     }
                 ]
             elif "ebook" in book_kinds:
@@ -1074,6 +1104,7 @@ def api():
                     allowed_file_types=profile["allowed_file_types"],
                     enforce_min_duration=profile["enforce_min_duration"],
                     book_kinds=profile["book_kinds"],
+                    preferred_categories=profile["preferred_categories"],
                 )
             logger.info(
                 "Mapped Easynews results: query=%r category_profile=%s returned=%s mapped=%s",
@@ -1131,7 +1162,9 @@ def api():
                 "ext": ext,
                 "groups": groups,
             }
-            category_id = _detect_category(title_text, title_metadata)
+            category_id = it.get("category_override") or _detect_category(
+                title_text, title_metadata
+            )
 
             attr_parts = [
                 f'<newznab:attr name="size" value="{size}"/>',

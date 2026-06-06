@@ -30,6 +30,8 @@ be invisible through the bridge.
 
 Caps now advertise Books:
 
+- `3000` Audio
+- `3030` Audio/Audiobook
 - `7000` Books
 - `7010` Books/EBook
 - `7040` Books/Audiobook
@@ -40,6 +42,8 @@ Search behavior now depends on the requested Newznab category:
 
 - Movie/TV searches still use `fty[]=VIDEO`.
 - Generic video searches without book categories still use `fty[]=VIDEO`.
+- Audio/Audiobook searches, `cat=3000` or `cat=3030`, do not force an EasyNews
+  file type filter.
 - EBook searches, `cat=7010`, do not force `fty[]=VIDEO`.
 - Audiobook searches, `cat=7040`, do not force an EasyNews file type filter.
 - Top-level Books searches, `cat=7000`, do not force a file type filter so both
@@ -122,6 +126,8 @@ Invoke-WebRequest "http://127.0.0.1:8081/api?t=caps&apikey=testkey" | Select-Obj
 Expected:
 
 - category `7000` named `Books`
+- category `3000` named `Audio`
+- subcategory `3030` named `Audio/Audiobook`
 - subcategory `7010` named `Books/EBook`
 - subcategory `7040` named `Books/Audiobook`
 
@@ -146,6 +152,17 @@ Expected:
 
 - RSS response
 - sample result categorized as `7040`
+
+For clients that use the Audio category tree for audiobooks:
+
+```powershell
+Invoke-WebRequest "http://127.0.0.1:8081/api?t=search&q=test&cat=3030&apikey=testkey" | Select-Object -ExpandProperty Content
+```
+
+Expected:
+
+- RSS response
+- sample result categorized as `3030`
 
 ### Live EBook Search
 
@@ -240,20 +257,23 @@ categories.
 
 Expected:
 
-- Audiobook searches should use `cat=7040` or possibly top-level `cat=7000`.
-- `cat=7040` and `cat=7000` searches should avoid a forced EasyNews media type.
+- Audiobook searches may use `cat=3030`, `cat=3000`, `cat=7040`, or possibly
+  top-level `cat=7000`.
+- `cat=3030`, `cat=3000`, `cat=7040`, and `cat=7000` searches should avoid a
+  forced EasyNews media type.
 - The bridge intentionally avoids `fty[]=AUDIO` by default because EasyNews
   audiobook posts may be header/newsgroup based and `AUDIO` coverage is
   unproven.
-- `.mp3` and `.m4b` results should be categorized as `7040`.
+- `.mp3` and `.m4b` results should be categorized as `3030` when Chaptarr uses
+  the Audio category tree, or `7040` when it uses the Books category tree.
 
 Limitations:
 
 - Audiobook posts that appear on the EasyNews website as `.rar`, `.zip`, `.7z`,
   split archives, or other container formats are still likely to be filtered out.
-- If an audiobook is visible on the website but not returned through `cat=7040`,
-  try testing with `cat=7000` to see whether the broader Books search exposes
-  it.
+- If an audiobook is visible on the website but not returned through one
+  audiobook category, try testing with `cat=3000` and `cat=7000` to compare the
+  Audio and Books parent categories.
 - If EasyNews only exposes group data in a list format without newsgroup fields,
   title and extension detection become the primary signals.
 
@@ -265,4 +285,4 @@ Limitations:
 - Archive-based audiobook posts are not yet supported.
 - The bridge does not yet inspect archive contents.
 - The bridge does not yet support additional book-related Newznab categories
-  beyond `7000`, `7010`, and `7040`.
+  beyond `3000`, `3030`, `7000`, `7010`, and `7040`.
