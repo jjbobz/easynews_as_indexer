@@ -834,6 +834,17 @@ def filter_and_map(
 
 @APP.route("/api")
 def api():
+    request_attrs = dict(request.args)
+    if "apikey" in request_attrs:
+        request_attrs["apikey"] = "<redacted>"
+    logger.info(
+        "NEWZNAB request t=%s q=%s cat=%s attrs=%s",
+        request.args.get("t"),
+        request.args.get("q"),
+        request.args.get("cat"),
+        request_attrs,
+    )
+
     if not require_apikey():
         return Response("Unauthorized", status=401)
 
