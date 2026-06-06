@@ -559,6 +559,20 @@ def _space_creator_initials(text: str) -> str:
     return re.sub(r"\s+", " ", spaced).strip()
 
 
+def _move_trailing_creator_to_front(text: str) -> str:
+    match = re.search(
+        r"^(?P<title>.+?)\s+(?P<author>(?:[A-Z]\.\s*){2,3}[A-Z][a-z]+|(?:[A-Z]\s+){2,3}[A-Z][a-z]+)$",
+        text,
+    )
+    if not match:
+        return text
+    title = match.group("title").strip()
+    author = _normalize_creator_initials(match.group("author").strip())
+    if not title or not author:
+        return text
+    return f"{author} {title}"
+
+
 def _clean_audiobook_query_title(query: str) -> str:
     working = query or ""
     working = re.sub(
@@ -576,6 +590,7 @@ def _clean_audiobook_query_title(query: str) -> str:
     working = re.sub(r"[_:\s]+", " ", working)
     working = re.sub(r"\s+", " ", working).strip()
     working = _normalize_creator_initials(working)
+    working = _move_trailing_creator_to_front(working)
     return working
 
 
