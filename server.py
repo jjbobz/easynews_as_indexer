@@ -98,11 +98,18 @@ def encode_id(item: dict) -> str:
                     "ext": child.get("ext"),
                     "sig": child.get("sig"),
                     "posted": child.get("posted"),
+                    "poster": child.get("poster"),
+                    "groups": child.get("groups"),
+                    "size": child.get("size"),
+                    "title": child.get("title"),
                 }
                 for child in item.get("items", [])
             ],
             "title": item.get("title"),
             "posted": item.get("posted"),
+            "poster": item.get("poster"),
+            "groups": item.get("groups"),
+            "size": item.get("size"),
         }
     else:
         payload = {
@@ -112,6 +119,9 @@ def encode_id(item: dict) -> str:
             "sig": item.get("sig"),
             "title": item.get("title"),
             "posted": item.get("posted"),
+            "poster": item.get("poster"),
+            "groups": item.get("groups"),
+            "size": item.get("size"),
         }
     if item.get("sample"):
         payload["sample"] = True
@@ -506,9 +516,39 @@ def _audiobook_group_key(title: str) -> str:
     return _sanitize_phrase(_audiobook_group_title(title))
 
 
-def _group_audiobook_tracks(items: List[dict]) -> List[dict]:
+def _normalize_creator_initials(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        initials = [part for part in match.group(1).split() if part]
+        surname = match.group(2)
+        return f"{'.'.join(initials)}. {surname}"
+
+    return re.sub(r"\b((?:[A-Z]\s+){2,})([A-Z][a-z]+)\b", repl, text)
+
+
+def _clean_audiobook_query_title(query: str) -> str:
+    working = query or ""
+    working = re.sub(
+        r"\b(?:mp3|m4b|audiobook|audio\s*book)\b",
+        " ",
+        working,
+        flags=re.IGNORECASE,
+    )
+    working = re.sub(
+        r"\b(?:book|volume|vol|part|pt)\s*\d+\b",
+        " ",
+        working,
+        flags=re.IGNORECASE,
+    )
+    working = re.sub(r"[_:\s]+", " ", working)
+    working = re.sub(r"\s+", " ", working).strip()
+    working = _normalize_creator_initials(working)
+    return working
+
+
+def _group_audiobook_tracks(items: List[dict], query_title: str = "") -> List[dict]:
     grouped: Dict[str, List[dict]] = {}
     passthrough: List[dict] = []
+    clean_query_title = _clean_audiobook_query_title(query_title)
     for item in items:
         if _detect_book_category(
             item.get("title", ""),
@@ -531,7 +571,7 @@ def _group_audiobook_tracks(items: List[dict]) -> List[dict]:
         group_items.sort(key=lambda item: item.get("title", ""))
         first = group_items[0]
         total_size = sum(int(item.get("size") or 0) for item in group_items)
-        title = _audiobook_group_title(first.get("title", "Audiobook"))
+        title = clean_query_title or _audiobook_group_title(first.get("title", "Audiobook"))
         quality = first.get("quality") or _detect_audiobook_quality(
             first.get("title", ""),
             first.get("ext"),
@@ -678,6 +718,85 @@ def _easynews_details_url(title: str) -> str:
         "https://members.easynews.com/2.0/search/solr-search/"
         "?fly=2&sb=1&pno=1&pby=250&u=1&chxu=1&chxgx=1&st=basic"
         f"&gps={quote(title)}&vv=1&safeO=0&s1=relevance&s1d=-"
+    )
+
+
+def _format_size(size: Any) -> str:
+    try:
+        value = float(size or 0)
+    except (TypeError, ValueError):
+        value = 0
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def _details_html(release: dict) -> str:
+    title = release.get("title") or release.get("filename") or "EasyNews release"
+    entries = release.get("items")
+    if not isinstance(entries, list) or not entries:
+        entries = [release]
+    posted_dt = _coerce_datetime(release.get("posted"))
+    posted = posted_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if posted_dt else ""
+    raw_groups = release.get("groups") or entries[0].get("groups") or ""
+    group_rows = "".join(
+        f"<li>{html.escape(group.strip())}</li>"
+        for group in str(raw_groups).split(",")
+        if group.strip()
+    )
+    file_rows = []
+    for idx, entry in enumerate(entries, 1):
+        entry_title = entry.get("title") or (
+            f"{entry.get('filename', '')}{entry.get('ext', '')}"
+        )
+        entry_posted_dt = _coerce_datetime(entry.get("posted"))
+        entry_posted = (
+            entry_posted_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            if entry_posted_dt
+            else ""
+        )
+        file_rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{html.escape(str(entry_title or ''))}</td>"
+            f"<td>{html.escape(str(entry.get('ext') or ''))}</td>"
+            f"<td>{html.escape(_format_size(entry.get('size')))}</td>"
+            f"<td>{html.escape(entry_posted)}</td>"
+            f"<td>{html.escape(str(entry.get('poster') or ''))}</td>"
+            "</tr>"
+        )
+    easynews_url = _easynews_details_url(str(title))
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(str(title))}</title>"
+        "<style>"
+        "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:24px;color:#222}"
+        "h1{font-size:22px;margin:0 0 16px}"
+        ".meta{display:grid;grid-template-columns:max-content 1fr;gap:8px 16px;margin-bottom:20px}"
+        ".label{font-weight:600;color:#555}"
+        "table{border-collapse:collapse;width:100%;font-size:14px}"
+        "th,td{border-bottom:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}"
+        "th{background:#f5f5f5}"
+        "ul{margin-top:0;padding-left:20px}"
+        "a{color:#1769aa}"
+        "</style></head><body>"
+        f"<h1>{html.escape(str(title))}</h1>"
+        "<div class='meta'>"
+        "<div class='label'>Indexer</div><div>EasyNews Bridge</div>"
+        f"<div class='label'>Files</div><div>{len(entries)}</div>"
+        f"<div class='label'>Size</div><div>{html.escape(_format_size(release.get('size')))}</div>"
+        f"<div class='label'>Posted</div><div>{html.escape(posted)}</div>"
+        f"<div class='label'>Poster</div><div>{html.escape(str(release.get('poster') or ''))}</div>"
+        f"<div class='label'>Groups</div><div><ul>{group_rows}</ul></div>"
+        f"<div class='label'>EasyNews search</div><div><a href='{html.escape(easynews_url)}'>Open raw EasyNews search</a></div>"
+        "</div>"
+        "<table><thead><tr><th>#</th><th>File</th><th>Ext</th><th>Size</th><th>Posted</th><th>Poster</th></tr></thead>"
+        f"<tbody>{''.join(file_rows)}</tbody></table>"
+        "</body></html>"
     )
 
 
@@ -1282,7 +1401,7 @@ def api():
             )
             if "audiobook" in profile["book_kinds"]:
                 before_grouping = len(items)
-                items = _group_audiobook_tracks(items)
+                items = _group_audiobook_tracks(items, raw_query)
                 logger.info(
                     "Grouped audiobook results: before=%s after=%s",
                     before_grouping,
@@ -1311,7 +1430,7 @@ def api():
         for it in items:
             enc_id = encode_id(it)
             title = xml_escape(it["title"]) if it["title"] else "Untitled"
-            detail_url = _easynews_details_url(it.get("title") or "")
+            detail_url = f"{request.url_root.rstrip('/')}/details?id={enc_id}"
             safe_detail_url = xml_escape(detail_url)
             link = f"{request.url_root.rstrip('/')}/api?t=get&id={enc_id}&apikey={request.args.get('apikey')}"
             safe_link = xml_escape(link)
@@ -1465,6 +1584,18 @@ def api():
         return resp
 
     return Response("Unsupported 't' parameter", status=400)
+
+
+@APP.route("/details")
+def details():
+    enc_id = request.args.get("id")
+    if not enc_id:
+        return Response("Missing id", status=400)
+    try:
+        release = decode_id(enc_id)
+    except Exception:
+        return Response("Invalid id", status=400)
+    return Response(_details_html(release), mimetype="text/html")
 
 
 if __name__ == "__main__":
