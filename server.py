@@ -1,8 +1,10 @@
 import base64
+import hashlib
 import html
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import zlib
@@ -50,6 +52,11 @@ _load_dotenv()
 API_KEY = os.environ.get("NEWZNAB_APIKEY", "testkey")
 EZ_USER = os.environ.get("EASYNEWS_USER")
 EZ_PASS = os.environ.get("EASYNEWS_PASS")
+RELEASE_ID_TTL = int(os.environ.get("RELEASE_ID_TTL", "86400"))
+RELEASE_ID_DIR = os.environ.get(
+    "RELEASE_ID_DIR",
+    os.path.join(tempfile.gettempdir(), "easynews_as_indexer_releases"),
+)
 
 
 def require_apikey() -> bool:
@@ -85,6 +92,44 @@ def xml_escape(s: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
+
+
+def _release_id_path(token: str) -> str:
+    return os.path.join(RELEASE_ID_DIR, f"{token}.json.z")
+
+
+def _cleanup_release_ids() -> None:
+    try:
+        os.makedirs(RELEASE_ID_DIR, exist_ok=True)
+        cutoff = time.time() - RELEASE_ID_TTL
+        for name in os.listdir(RELEASE_ID_DIR):
+            if not name.endswith(".json.z"):
+                continue
+            path = os.path.join(RELEASE_ID_DIR, name)
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+    except Exception:
+        logger.debug("Release id cleanup failed", exc_info=True)
+
+
+def _store_release_payload(packed: bytes) -> str:
+    os.makedirs(RELEASE_ID_DIR, exist_ok=True)
+    token = hashlib.sha256(packed).hexdigest()[:32]
+    path = _release_id_path(token)
+    if not os.path.exists(path):
+        tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(zlib.compress(packed))
+        os.replace(tmp_path, path)
+    _cleanup_release_ids()
+    return f"r.{token}"
+
+
+def _load_release_payload(token: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("Invalid release token")
+    with open(_release_id_path(token), "rb") as f:
+        return json.loads(zlib.decompress(f.read()).decode())
 
 
 def encode_id(item: dict) -> str:
@@ -129,11 +174,12 @@ def encode_id(item: dict) -> str:
     if item.get("sample"):
         payload["sample"] = True
     packed = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-    raw = base64.urlsafe_b64encode(zlib.compress(packed)).decode().rstrip("=")
-    return f"z.{raw}"
+    return _store_release_payload(packed)
 
 
 def decode_id(enc: str) -> dict:
+    if enc.startswith("r."):
+        return _load_release_payload(enc[2:])
     if enc.startswith("z."):
         pad = "=" * (-(len(enc) - 2) % 4)
         raw = base64.urlsafe_b64decode(enc[2:] + pad)
