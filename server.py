@@ -10,7 +10,7 @@ import time
 import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from flask import Flask, Response, request
 import json
@@ -100,19 +100,22 @@ def xml_escape(s: str) -> str:
     )
 
 
-def _public_base_url() -> str:
-    configured = (os.environ.get("PUBLIC_URL") or os.environ.get("BASE_URL") or "").strip()
+def get_base_url() -> str:
+    configured = (os.environ.get("BASE_URL") or os.environ.get("PUBLIC_URL") or "").strip()
     if configured:
         return configured.rstrip("/")
-    candidate = (request.host_url or request.url_root or "").strip().rstrip("/")
-    parsed = urlsplit(candidate)
-    if parsed.scheme and parsed.netloc:
-        return candidate
-    scheme = request.scheme or "http"
-    host = request.host
-    if host:
-        return f"{scheme}://{host}"
-    return candidate.replace(":/", "://", 1)
+
+    return request.host_url.rstrip("/")
+
+
+def _startup_base_url_for_log() -> str:
+    configured = (os.environ.get("BASE_URL") or os.environ.get("PUBLIC_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "<request.host_url>"
+
+
+logger.info("Using BASE_URL=%s", _startup_base_url_for_log())
 
 
 def _release_id_path(token: str) -> str:
@@ -1756,7 +1759,7 @@ def api():
         chan_title = f"Results for {display_q}"
         now_dt = datetime.now(timezone.utc)
         channel_pub = now_dt.strftime("%a, %d %b %Y %H:%M:%S %z")
-        base_url = _public_base_url()
+        base_url = get_base_url()
         apikey = request.args.get("apikey") or API_KEY or ""
 
         header = (
