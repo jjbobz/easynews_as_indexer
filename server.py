@@ -10,7 +10,7 @@ import time
 import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from flask import Flask, Response, request
 import json
@@ -52,6 +52,12 @@ _load_dotenv()
 API_KEY = os.environ.get("NEWZNAB_APIKEY", "testkey")
 EZ_USER = os.environ.get("EASYNEWS_USER")
 EZ_PASS = os.environ.get("EASYNEWS_PASS")
+STRICT_MATCHING = os.environ.get("STRICT_MATCHING", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 RELEASE_ID_TTL = int(os.environ.get("RELEASE_ID_TTL", "86400"))
 RELEASE_ID_DIR = os.environ.get(
     "RELEASE_ID_DIR",
@@ -92,6 +98,21 @@ def xml_escape(s: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
+
+
+def _public_base_url() -> str:
+    configured = (os.environ.get("PUBLIC_URL") or os.environ.get("BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    candidate = (request.host_url or request.url_root or "").strip().rstrip("/")
+    parsed = urlsplit(candidate)
+    if parsed.scheme and parsed.netloc:
+        return candidate
+    scheme = request.scheme or "http"
+    host = request.host
+    if host:
+        return f"{scheme}://{host}"
+    return candidate.replace(":/", "://", 1)
 
 
 def _release_id_path(token: str) -> str:
@@ -1174,6 +1195,26 @@ def _matches_strict(title: str, strict_phrase: Optional[str]) -> bool:
     return False
 
 
+def _video_search_queries(
+    base_query: str,
+    search_label: str,
+    season: Optional[int],
+    episode: Optional[int],
+) -> List[str]:
+    queries: List[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip()
+        if value and value not in queries:
+            queries.append(value)
+
+    add(search_label or base_query)
+    if season is not None and episode is None and base_query:
+        add(f"{base_query} Season {season}")
+        add(base_query)
+    return queries
+
+
 def filter_and_map(
     json_data: dict,
     min_bytes: int,
@@ -1186,12 +1227,18 @@ def filter_and_map(
     enforce_min_duration: bool = True,
     book_kinds: Optional[Set[str]] = None,
     preferred_categories: Optional[Dict[str, int]] = None,
+    rejection_counts: Optional[Dict[str, int]] = None,
 ) -> List[dict]:
     token_set: Set[str] = set(query_tokens or [])
     wanted_book_kinds = set(book_kinds or [])
     category_preferences = preferred_categories or {}
     thumb_base = json_data.get("thumbURL") or json_data.get("thumbUrl")
     out: List[dict] = []
+
+    def reject(reason: str) -> None:
+        if rejection_counts is not None:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
     for it in json_data.get("data", []):
         hash_id: Optional[str] = None
         subject: Optional[str] = None
@@ -1237,6 +1284,7 @@ def filter_and_map(
             group_text = _extract_group_text(it)
 
         if not hash_id or not ext:
+            reject("missing_hash_or_extension")
             continue
 
         filename_no_ext = filename_no_ext or ""
@@ -1252,6 +1300,7 @@ def filter_and_map(
                 size = 0
 
         if size < min_bytes:
+            reject("below_min_size")
             continue
 
         duration_seconds = _parse_duration_seconds(duration_raw)
@@ -1264,6 +1313,7 @@ def filter_and_map(
             allowed_file_types=allowed_file_types,
             enforce_min_duration=enforce_min_duration,
         ):
+            reject("flagged_or_disallowed_type")
             continue
 
         title: Optional[str] = None
@@ -1289,8 +1339,10 @@ def filter_and_map(
             elif book_category in {CATEGORY_EBOOK, CATEGORY_BOOKS}:
                 item_book_kind = "ebook"
             else:
+                reject("not_requested_book_kind")
                 continue
             if item_book_kind not in wanted_book_kinds:
+                reject("wrong_book_kind")
                 continue
             category_override = category_preferences.get(item_book_kind)
         else:
@@ -1302,6 +1354,7 @@ def filter_and_map(
             quality = title_meta.get("quality")
 
         if strict_match and not _matches_strict(title, strict_phrase):
+            reject("strict_title_mismatch")
             continue
 
         if query_meta:
@@ -1314,17 +1367,22 @@ def filter_and_map(
             t_episode = title_meta.get("episode")
             t_quality = quality or title_meta.get("quality")
             if q_year and t_year and q_year != t_year:
+                reject("year_mismatch")
                 continue
             if q_season and t_season and q_season != t_season:
+                reject("season_mismatch")
                 continue
             if q_episode and t_episode and q_episode != t_episode:
+                reject("episode_mismatch")
                 continue
             if q_quality and t_quality and q_quality.lower() != t_quality.lower():
+                reject("quality_mismatch")
                 continue
 
         if token_set:
             title_tokens = set(_tokenize(title))
             if not title_tokens or not token_set.issubset(title_tokens):
+                reject("token_mismatch")
                 continue
 
         duration_formatted = _format_duration(duration_seconds)
@@ -1391,8 +1449,13 @@ def api():
             '<subcat id="3030" name="Audio/Audiobook"/>'
             "</category>"
             '<category id="2000" name="Movies">'
+            '<subcat id="2010" name="Movies/Foreign"/>'
+            '<subcat id="2020" name="Movies/Other"/>'
             '<subcat id="2030" name="Movies/HD"/>'
             '<subcat id="2040" name="Movies/UHD"/>'
+            '<subcat id="2045" name="Movies/BluRay"/>'
+            '<subcat id="2050" name="Movies/3D"/>'
+            '<subcat id="2060" name="Movies/SD"/>'
             "</category>"
             '<category id="5000" name="TV">'
             '<subcat id="5030" name="TV/HD"/>'
@@ -1464,16 +1527,8 @@ def api():
             else:
                 q = "matrix"  # Movie fallback
             fallback_query = True
-        query_tokens = _tokenize(raw_query)
-        query_meta = _extract_release_markers(raw_query)
-        if year_int:
-            query_meta["year"] = year_int
-        if season_int is not None:
-            query_meta["season"] = season_int
-        if episode_int is not None:
-            query_meta["episode"] = episode_int
         strict_param = request.args.get("strict")
-        strict_requested = t in {"movie", "tvsearch"}
+        strict_requested = STRICT_MATCHING if t in {"movie", "tvsearch"} else False
         if strict_param is not None:
             strict_requested = strict_param.strip().lower() not in {
                 "0",
@@ -1481,6 +1536,18 @@ def api():
                 "no",
                 "off",
             }
+        season_only_tv = t == "tvsearch" and season_int is not None and episode_int is None
+        token_source = raw_query
+        if not strict_requested and season_only_tv and base_query:
+            token_source = base_query
+        query_tokens = _tokenize(token_source)
+        query_meta = _extract_release_markers(raw_query)
+        if year_int:
+            query_meta["year"] = year_int
+        if season_int is not None:
+            query_meta["season"] = season_int
+        if episode_int is not None:
+            query_meta["episode"] = episode_int
         strict_phrase = _sanitize_phrase(raw_query) if strict_requested else None
         limit = int(request.args.get("limit", "100"))
         offset = int(request.args.get("offset", "0"))
@@ -1495,6 +1562,17 @@ def api():
         min_bytes = min_size_mb * 1024 * 1024
         filter_query_tokens = (
             None if profile["kind"] == "books" else query_tokens
+        )
+        logger.info(
+            "NEWZNAB search normalized: t=%s q=%r cat=%r season=%r ep=%r strict=%s easynews_query=%r token_source=%r",
+            t,
+            base_query,
+            cat_param,
+            season_int,
+            episode_int,
+            strict_requested,
+            q,
+            token_source,
         )
 
         if fallback_query:
@@ -1592,12 +1670,13 @@ def api():
             search_queries = (
                 _book_search_queries(q, dict(request.args))
                 if profile["kind"] == "books"
-                else [q]
+                else _video_search_queries(base_query, q, season_int, episode_int)
             )
             items = []
             data = {"data": []}
             used_query = q
             for search_query in search_queries:
+                used_query = search_query
                 # aim for maximum results per page
                 data = c.search(
                     query=search_query,
@@ -1607,6 +1686,7 @@ def api():
                     sort_field="relevance",
                     sort_dir="-",
                 )
+                rejection_counts: Dict[str, int] = {}
                 if fallback_query:
                     mapped_items = filter_and_map(data, min_bytes=min_bytes)
                 else:
@@ -1622,16 +1702,22 @@ def api():
                         enforce_min_duration=profile["enforce_min_duration"],
                         book_kinds=profile["book_kinds"],
                         preferred_categories=profile["preferred_categories"],
+                        rejection_counts=rejection_counts,
                     )
                 logger.info(
-                    "Mapped Easynews results: query=%r search_query=%r category_profile=%s returned=%s mapped=%s",
+                    "Mapped Easynews results: t=%s q=%r cat=%r season=%r ep=%r search_query=%r category_profile=%s raw_returned=%s mapped=%s rejections=%s",
+                    t,
                     q,
+                    cat_param,
+                    season_int,
+                    episode_int,
                     search_query,
                     profile["kind"],
                     len(data.get("data", [])),
                     len(mapped_items),
+                    rejection_counts,
                 )
-                if mapped_items or profile["kind"] != "books":
+                if mapped_items:
                     items = mapped_items
                     used_query = search_query
                     break
@@ -1649,6 +1735,20 @@ def api():
                     len(items),
                 )
 
+        mapped_total = len(items)
+        logger.info(
+            "NEWZNAB response counts: t=%s q=%r cat=%r season=%r ep=%r mapped_total=%s offset=%s limit=%s returned=%s",
+            t,
+            base_query,
+            cat_param,
+            season_int,
+            episode_int,
+            mapped_total,
+            offset,
+            limit,
+            max(0, min(limit, mapped_total - offset)),
+        )
+
         # Trim by limit (handles fallback and real queries)
         items = items[offset : offset + limit]
 
@@ -1656,6 +1756,8 @@ def api():
         chan_title = f"Results for {display_q}"
         now_dt = datetime.now(timezone.utc)
         channel_pub = now_dt.strftime("%a, %d %b %Y %H:%M:%S %z")
+        base_url = _public_base_url()
+        apikey = request.args.get("apikey") or API_KEY or ""
 
         header = (
             '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1663,17 +1765,18 @@ def api():
             "<channel>"
             f"<title>{xml_escape(chan_title)}</title>"
             f"<description>{xml_escape(chan_title)}</description>"
-            f"<link>{request.url_root.rstrip('/')}/api</link>"
+            f"<link>{xml_escape(base_url + '/api')}</link>"
             f"<pubDate>{channel_pub}</pubDate>"
         )
 
         body_parts: List[str] = []
         for it in items:
             enc_id = encode_id(it)
+            safe_enc_id_param = quote(enc_id, safe="")
             title = xml_escape(it["title"]) if it["title"] else "Untitled"
-            detail_url = f"{request.url_root.rstrip('/')}/details?id={enc_id}"
+            detail_url = f"{base_url}/details?id={safe_enc_id_param}"
             safe_detail_url = xml_escape(detail_url)
-            link = f"{request.url_root.rstrip('/')}/api?t=get&id={enc_id}&apikey={request.args.get('apikey')}"
+            link = f"{base_url}/api?t=get&id={safe_enc_id_param}&apikey={quote(apikey, safe='')}"
             safe_link = xml_escape(link)
             size = it["size"]
             guid = enc_id

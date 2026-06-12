@@ -30,6 +30,9 @@ pip install -r requirements.txt
 EASYNEWS_USER=your_easynews_username
 EASYNEWS_PASS=your_easynews_password
 NEWZNAB_APIKEY=testkey
+PORT=8081
+PUBLIC_URL=http://127.0.0.1:8081
+STRICT_MATCHING=1
 ```
 
 4. Run the server:
@@ -57,6 +60,7 @@ docker run --rm -d -p 8081:8081 \
 	-e EASYNEWS_PASS=your_easynews_password \
 	-e NEWZNAB_APIKEY=testkey \
 	-e PORT=8081 \
+	-e PUBLIC_URL=http://10.10.10.5:8081 \
 	-e STRICT_MATCHING=1 \
 	ghcr.io/sanket9225/easynews_as_indexer:latest
 ```
@@ -71,6 +75,7 @@ docker run --rm -d -p 8081:8081 ^
 	-e EASYNEWS_PASS=your_easynews_password ^
 	-e NEWZNAB_APIKEY=testkey ^
 	-e PORT=8081 ^
+	-e PUBLIC_URL=http://10.10.10.5:8081 ^
 	-e STRICT_MATCHING=1 ^
 	ghcr.io/sanket9225/easynews_as_indexer:latest
 ```
@@ -83,9 +88,9 @@ To tail logs from the detached container run `docker logs -f <container-id>`.
 - Search (video-only): `GET /api?t=search&q=<query>&apikey=<key>&limit=<n>&minsize=<MB>`
 	- Default `limit=100`, `minsize=100` (MB)
 	- Also supports `t=movie` and `t=tvsearch`
-	- **Strict matching** is enabled by default for `t=movie` and `t=tvsearch` (requires title to contain all query words); disabled for plain `t=search`
+	- **Strict matching** is enabled by default for `t=movie` and `t=tvsearch` with `STRICT_MATCHING=1`; set `STRICT_MATCHING=0` to broaden matching, especially for season-pack searches
 	- Optional `strict=0|1` overrides title matching strictness per request
-	- Movie search accepts `year=<YYYY>` to bias results; TV search accepts `season=<NN>` and `ep=<NN>` (automatically appended as `SxxEyy` in the Easynews query)
+	- Movie search accepts `year=<YYYY>` to bias results; TV search accepts `season=<NN>` and `ep=<NN>` (episode searches append `SxxEyy`; season-only searches try `Sxx`, `Season x`, and the base title)
 - Download NZB: `GET /api?t=get&id=<encoded>&apikey=<key>`
 	- Filename equals the item title
 
